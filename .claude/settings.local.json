@@ -1,7 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"import msal, httpx, fastapi, sqlalchemy, cryptography; print\\('core deps OK'\\)\")",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"from integrations.graph_client import GraphClient, GraphAuthError; c=GraphClient\\(\\); print\\('GraphClient import OK'\\); print\\('auth url host:', c.get_authorization_url\\('s'\\)[:55]\\)\")",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe _import_check.py)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pip install --quiet \"psycopg2-binary>=2.9.10\")",
+      "PowerShell(if \\($?\\) { \"psycopg2-binary installed\" })",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe _smoke.py)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m ruff check integrations workers apps storage)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"from cryptography.fernet import Fernet; print\\(Fernet.generate_key\\(\\).decode\\(\\)\\)\")",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"from config.settings import settings; print\\('env loaded - key set:', bool\\(settings.token_encryption_key\\)\\); print\\('azure_client_id empty:', settings.azure_client_id == ''\\)\")",
+      "PowerShell(git check-ignore .env)",
+      "PowerShell(\"---\")"
     ]
   }
 }

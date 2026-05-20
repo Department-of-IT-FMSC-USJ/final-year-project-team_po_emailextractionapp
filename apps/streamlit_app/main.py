@@ -3,7 +3,8 @@
 import httpx
 import streamlit as st
 
-from apps.streamlit_app.pages import inbox, settings
+from apps.streamlit_app.pages import inbox
+from apps.streamlit_app.pages import settings as settings_page
 from config.settings import settings
 
 st.set_page_config(page_title="PO Email Intelligence", layout="wide")
@@ -23,7 +24,7 @@ def main() -> None:
         if page == "Inbox":
             inbox.render(client)
         else:
-            settings.render(client)
+            settings_page.render(client)
 
 
 if __name__ == "__main__":
