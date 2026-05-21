@@ -1,19 +1,18 @@
 """Microsoft Graph API — OAuth login and mail fetch.
 
-OAuth (MSAL) calls are synchronous; they run in a thread so they do not
-block the FastAPI event loop. Graph REST calls use httpx.AsyncClient.
+OAuth uses the authorization-code flow directly against the Microsoft
+identity platform token endpoint (no MSAL), mirroring the approach
+proven in the previous project. All HTTP is async via httpx.
 """
 
-import asyncio
 import base64
 import binascii
 import json
 import logging
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
-import msal
 
 from config.settings import settings
 
@@ -21,9 +20,6 @@ GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
 AUTHORITY_BASE = "https://login.microsoftonline.com"
 
 log = logging.getLogger("po.graph")
-
-# MSAL manages these itself; passing them as scopes raises ValueError.
-_RESERVED_SCOPES = {"openid", "profile", "offline_access"}
 
 
 class GraphAuthError(RuntimeError):
@@ -47,60 +43,71 @@ class GraphClient:
         self._client_id = settings.azure_client_id
         self._client_secret = settings.azure_client_secret
         self._redirect_uri = settings.graph_redirect_uri
-        self._scopes = [s for s in settings.graph_scopes.split() if s.lower() not in _RESERVED_SCOPES]
-        self._msal_app: msal.ConfidentialClientApplication | None = None
+        self._scopes = settings.graph_scopes.split()
 
     # --- OAuth / login -------------------------------------------------
 
-    def _app(self) -> msal.ConfidentialClientApplication:
-        if self._msal_app is None:
-            self._msal_app = msal.ConfidentialClientApplication(
-                client_id=self._client_id,
-                client_credential=self._client_secret,
-                authority=f"{AUTHORITY_BASE}/{self._tenant_id}",
-            )
-        return self._msal_app
+    @property
+    def _authority(self) -> str:
+        return f"{AUTHORITY_BASE}/{self._tenant_id}"
 
     def get_authorization_url(self, state: str) -> str:
         """Build the Microsoft sign-in URL to redirect the user to."""
-        return self._app().get_authorization_request_url(
-            scopes=self._scopes,
-            state=state,
-            redirect_uri=self._redirect_uri,
-        )
+        params = {
+            "client_id": self._client_id,
+            "response_type": "code",
+            "redirect_uri": self._redirect_uri,
+            "response_mode": "query",
+            "scope": " ".join(self._scopes),
+            "state": state,
+            # Always show the account chooser — never silently reuse a
+            # cached session (which sends the request to the wrong tenant).
+            "prompt": "select_account",
+        }
+        return f"{self._authority}/oauth2/v2.0/authorize?{urlencode(params)}"
 
     async def exchange_code_for_tokens(self, code: str) -> dict[str, Any]:
-        """Exchange an OAuth authorization code for access + refresh tokens.
-
-        Returns the raw MSAL result (``access_token``, ``refresh_token``,
-        ``expires_in``, ...). The access token is also cached on this client.
-        """
-        result = await asyncio.to_thread(
-            self._app().acquire_token_by_authorization_code,
-            code,
-            scopes=self._scopes,
-            redirect_uri=self._redirect_uri,
+        """Exchange an OAuth authorization code for access + refresh tokens."""
+        return await self._post_token(
+            {
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+                "code": code,
+                "redirect_uri": self._redirect_uri,
+                "grant_type": "authorization_code",
+                "scope": " ".join(self._scopes),
+            },
+            context="authorization code exchange",
         )
-        self._access_token = self._token_or_raise(result, "Authorization code exchange failed")
-        return result
 
     async def refresh_access_token(self, refresh_token: str) -> dict[str, Any]:
-        """Mint a fresh access token from a stored (decrypted) refresh token."""
-        result = await asyncio.to_thread(
-            self._app().acquire_token_by_refresh_token,
-            refresh_token,
-            scopes=self._scopes,
+        """Mint a fresh access token from a stored refresh token."""
+        return await self._post_token(
+            {
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+                "scope": " ".join(self._scopes),
+            },
+            context="token refresh",
         )
-        self._access_token = self._token_or_raise(result, "Refresh token exchange failed")
-        return result
 
-    @staticmethod
-    def _token_or_raise(result: dict[str, Any], context: str) -> str:
-        token = result.get("access_token")
-        if not token:
+    async def _post_token(self, data: dict[str, str], context: str) -> dict[str, Any]:
+        endpoint = f"{self._authority}/oauth2/v2.0/token"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(endpoint, data=data)
+        try:
+            result = resp.json()
+        except ValueError as exc:
+            raise GraphAuthError(
+                f"{context} failed: HTTP {resp.status_code} {resp.text[:200]}"
+            ) from exc
+        if "access_token" not in result:
             detail = result.get("error_description") or result.get("error") or "unknown error"
-            raise GraphAuthError(f"{context}: {detail}")
-        return token
+            raise GraphAuthError(f"{context} failed: {detail}")
+        self._access_token = result["access_token"]
+        return result
 
     # --- Mail fetch ----------------------------------------------------
 
@@ -112,8 +119,8 @@ class GraphClient:
         """
         params: dict[str, str] = {
             "$top": str(top),
-            "$orderby": "receivedDateTime desc",
-            "$select": "id,subject,from,receivedDateTime,hasAttachments,bodyPreview",
+            "$orderby": "receivedDateTime DESC",
+            "$select": "id,subject,from,receivedDateTime,hasAttachments,isRead,bodyPreview",
         }
         if skip_token:
             params["$skiptoken"] = skip_token

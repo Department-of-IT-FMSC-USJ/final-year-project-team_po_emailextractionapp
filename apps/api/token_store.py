@@ -1,23 +1,26 @@
-"""In-memory Outlook token store.
+"""In-memory Outlook token store — single session, no persistence.
 
-No database — tokens live only in this process and are lost on restart.
-Shared by the auth callback (writes) and the inbox route (reads).
-Swap these functions for a repository to make sessions durable.
+The token lives only in this process and is lost on restart. Mirrors the
+previous project's single-user session model. Swap for a repository to
+make it durable and multi-user.
 """
 
 from typing import Any
 
-_tokens: dict[str, dict[str, Any]] = {}
+_current: dict[str, Any] | None = None
 
 
-def save_tokens(user_id: str, tokens: dict[str, Any]) -> None:
-    _tokens[user_id] = tokens
+def save_tokens(tokens: dict[str, Any]) -> None:
+    """Store the token result from a login or refresh."""
+    global _current
+    _current = tokens
 
 
-def get_tokens(user_id: str) -> dict[str, Any] | None:
-    return _tokens.get(user_id)
+def get_tokens() -> dict[str, Any] | None:
+    """Return the current session's token result, or None if not signed in."""
+    return _current
 
 
-def latest_user_id() -> str | None:
-    """The most recently connected user — a single-session dev convenience."""
-    return next(reversed(_tokens), None) if _tokens else None
+def clear_tokens() -> None:
+    global _current
+    _current = None

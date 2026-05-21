@@ -10,7 +10,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from apps.api.token_store import get_tokens, latest_user_id, save_tokens
+from apps.api.token_store import get_tokens, save_tokens
+from classifier.service import ClassifierService
 from integrations.graph_client import GraphAuthError, GraphClient, GraphError
 
 router = APIRouter()
@@ -27,21 +28,17 @@ def _summarize(msg: dict[str, Any]) -> dict[str, Any]:
         "from_name": sender.get("name", ""),
         "received_at": msg.get("receivedDateTime"),
         "has_attachments": bool(msg.get("hasAttachments")),
+        "is_read": bool(msg.get("isRead", True)),
         "preview": msg.get("bodyPreview", ""),
     }
 
 
 @router.get("")
-async def live_inbox(
-    user_id: str | None = Query(default=None, description="Defaults to last connected user"),
-    top: int = Query(default=25, ge=1, le=100),
-):
-    """Return the newest inbox messages for a connected Outlook account."""
-    uid = user_id or latest_user_id()
-    tokens = get_tokens(uid) if uid else None
-    log.info("GET /inbox | user_id=%s resolved_uid=%s token_found=%s", user_id, uid, bool(tokens))
+async def live_inbox(top: int = Query(default=25, ge=1, le=100)):
+    """Return the newest inbox messages for the connected Outlook account."""
+    tokens = get_tokens()
+    log.info("GET /inbox | token_found=%s", bool(tokens))
     if not tokens:
-        log.warning("no token in store -> 401")
         raise HTTPException(
             status_code=401, detail="No Outlook session — sign in at /auth/login first."
         )
@@ -60,7 +57,7 @@ async def live_inbox(
         try:
             log.info("refreshing access token and retrying...")
             refreshed = await client.refresh_access_token(refresh_token)
-            save_tokens(uid, {**tokens, **refreshed})
+            save_tokens({**tokens, **refreshed})
             page = await client.list_messages(top=top)
         except GraphAuthError as exc:
             log.error("Graph still rejected token after refresh: %s", exc)
@@ -75,5 +72,14 @@ async def live_inbox(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     messages = [_summarize(m) for m in page.get("value", [])]
-    log.info("inbox fetch OK | %s message(s)", len(messages))
-    return {"user_id": uid, "count": len(messages), "messages": messages}
+
+    # Attach PO predictions when a trained classifier is available.
+    classifier = ClassifierService()
+    if classifier.is_ready:
+        for msg in messages:
+            prediction = classifier.predict(msg["id"] or "", msg["subject"], msg["preview"])
+            msg["predicted_label"] = prediction.predicted_label
+            msg["confidence"] = round(prediction.confidence, 3)
+
+    log.info("inbox fetch OK | %s message(s) | classified=%s", len(messages), classifier.is_ready)
+    return {"count": len(messages), "messages": messages, "classified": classifier.is_ready}
