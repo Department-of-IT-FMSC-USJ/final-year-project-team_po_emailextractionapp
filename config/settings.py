@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     api_base_url: str = "http://localhost:8000"
+    frontend_base_url: str = "http://127.0.0.1:8501"
 
     database_url: str = "postgresql://postgres:postgres@localhost:5432/po_email"
     redis_url: str = "redis://localhost:6379/0"
@@ -17,12 +18,16 @@ class Settings(BaseSettings):
     azure_client_id: str = ""
     azure_client_secret: str = ""
     graph_redirect_uri: str = "http://localhost:8000/auth/callback"
-    graph_scopes: str = "Mail.Read offline_access"
+    graph_scopes: str = (
+        "https://graph.microsoft.com/Mail.Read "
+        "https://graph.microsoft.com/User.Read offline_access"
+    )
 
     token_encryption_key: str = ""
 
     classifier_model_path: Path = Path("./models/classifier")
     classifier_model_version: str = "1.0.0"
+    classifier_labels_path: Path = Path("./data/labels.jsonl")
 
     extraction_rules_path: Path = Path("./extraction/rules")
     extractor_version: str = "1.0.0"
