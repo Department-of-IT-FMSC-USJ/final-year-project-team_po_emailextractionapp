@@ -186,11 +186,18 @@ class GraphClient:
     # --- Attachments (handled by the extraction step) ------------------
 
     async def list_attachments(self, message_id: str) -> list[dict[str, Any]]:
-        # TODO: implement with the extraction pipeline.
-        _ = message_id
-        return []
+        """Return metadata (id, name, contentType, size) for each attachment."""
+        params = {"$select": "id,name,size,contentType"}
+        result = await self._graph_get(f"/me/messages/{message_id}/attachments", params)
+        return result.get("value", [])
 
     async def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
-        # TODO: implement with the extraction pipeline.
-        _ = message_id, attachment_id
-        return b""
+        """Download one attachment's raw bytes (base64-decoded from Graph)."""
+        data = await self._graph_get(
+            f"/me/messages/{message_id}/attachments/{attachment_id}",
+            params={"$select": "id,name,contentType,size,contentBytes"},
+        )
+        content_b64 = data.get("contentBytes")
+        if not content_b64:
+            return b""
+        return base64.b64decode(content_b64)

@@ -1,6 +1,7 @@
 """Inbox page — connect Outlook and view your messages.
 
-Labeling for training is done on the **Classifier** page.
+Labeling for training happens on the **Classifier** page; extracted
+fields and attachment OCR live on the **Extraction** page.
 """
 
 import httpx

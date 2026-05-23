@@ -12,6 +12,8 @@ from fastapi import APIRouter, HTTPException, Query
 
 from apps.api.token_store import get_tokens, save_tokens
 from classifier.service import ClassifierService
+from extraction.service import ExtractionService
+from extraction.tables import html_to_text, parse_tables
 from integrations.graph_client import GraphAuthError, GraphClient, GraphError
 
 router = APIRouter()
@@ -34,10 +36,17 @@ def _summarize(msg: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("")
-async def live_inbox(top: int = Query(default=25, ge=1, le=100)):
+async def live_inbox(
+    top: int = Query(default=25, ge=1, le=100),
+    include_tables: bool = Query(
+        default=False,
+        description="When true, fetch the full HTML body for PO-predicted emails "
+        "and parse PO tables (slower; used by the Extraction page).",
+    ),
+):
     """Return the newest inbox messages for the connected Outlook account."""
     tokens = get_tokens()
-    log.info("GET /inbox | token_found=%s", bool(tokens))
+    log.info("GET /inbox | token_found=%s include_tables=%s", bool(tokens), include_tables)
     if not tokens:
         raise HTTPException(
             status_code=401, detail="No Outlook session — sign in at /auth/login first."
@@ -81,5 +90,46 @@ async def live_inbox(top: int = Query(default=25, ge=1, le=100)):
             msg["predicted_label"] = prediction.predicted_label
             msg["confidence"] = round(prediction.confidence, 3)
 
-    log.info("inbox fetch OK | %s message(s) | classified=%s", len(messages), classifier.is_ready)
-    return {"count": len(messages), "messages": messages, "classified": classifier.is_ready}
+    # Body extraction + table parsing run only for PO-predicted emails.
+    # Skipped entirely when no classifier has been trained.
+    if classifier.is_ready:
+        extractor = ExtractionService()
+        for msg in messages:
+            if msg.get("predicted_label") != "po":
+                continue
+
+            body_text = f"{msg['subject']}\n{msg['preview']}"
+
+            # When the Extraction page asks for it, fetch the full HTML body
+            # and replace the preview-based text with the real body.
+            if include_tables:
+                try:
+                    full = await client.get_message(msg["id"])
+                except (GraphAuthError, GraphError) as exc:
+                    log.warning("full-body fetch failed for %s: %s", msg["id"], exc)
+                else:
+                    body = full.get("body") or {}
+                    content = body.get("content", "")
+                    if body.get("contentType", "").lower() == "html":
+                        body_text = f"{msg['subject']}\n{html_to_text(content)}"
+                        rows = parse_tables(content)
+                    else:
+                        body_text = f"{msg['subject']}\n{content}"
+                        rows = []
+                    if rows:
+                        msg["table_rows"] = rows
+
+            result = extractor.extract(msg["id"] or "", body_text, attachment_paths=[])
+            if result.fields:
+                msg["extracted_fields"] = result.fields
+                msg["field_provenance"] = result.field_provenance
+
+    log.info(
+        "inbox fetch OK | %s message(s) | classified=%s | tables=%s",
+        len(messages), classifier.is_ready, include_tables,
+    )
+    return {
+        "count": len(messages),
+        "messages": messages,
+        "classified": classifier.is_ready,
+    }
