@@ -74,3 +74,14 @@ def label_counts() -> dict[str, int]:
         if label in counts:
             counts[label] += 1
     return counts
+
+
+def labels_by_email() -> dict[str, str]:
+    """Return ``{email_id: label}`` so the UI can mark already-labeled rows."""
+    out: dict[str, str] = {}
+    for record in load_labels():
+        eid = record.get("email_id")
+        label = record.get("label")
+        if eid and label in VALID_LABELS:
+            out[eid] = label
+    return out
