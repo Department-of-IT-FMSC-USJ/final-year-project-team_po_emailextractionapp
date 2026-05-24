@@ -5,6 +5,7 @@ Graph directly — no database. If the access token has expired it is
 refreshed once and the request retried.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -52,62 +53,64 @@ async def live_inbox(
             status_code=401, detail="No Outlook session — sign in at /auth/login first."
         )
 
-    client = GraphClient(access_token=tokens.get("access_token"))
-    try:
-        log.info("calling Graph list_messages(top=%s)", top)
-        page = await client.list_messages(top=top)
-    except GraphAuthError as first_err:
-        log.warning("first Graph call rejected token: %s", first_err)
-        refresh_token = tokens.get("refresh_token")
-        if not refresh_token:
-            raise HTTPException(
-                status_code=401, detail="Session expired — sign in again."
-            ) from None
+    async with GraphClient(access_token=tokens.get("access_token")) as client:
         try:
-            log.info("refreshing access token and retrying...")
-            refreshed = await client.refresh_access_token(refresh_token)
-            save_tokens({**tokens, **refreshed})
+            log.info("calling Graph list_messages(top=%s)", top)
             page = await client.list_messages(top=top)
-        except GraphAuthError as exc:
-            log.error("Graph still rejected token after refresh: %s", exc)
-            raise HTTPException(
-                status_code=401, detail=f"Outlook rejected the token: {exc}"
-            ) from exc
+        except GraphAuthError as first_err:
+            log.warning("first Graph call rejected token: %s", first_err)
+            refresh_token = tokens.get("refresh_token")
+            if not refresh_token:
+                raise HTTPException(
+                    status_code=401, detail="Session expired — sign in again."
+                ) from None
+            try:
+                log.info("refreshing access token and retrying...")
+                refreshed = await client.refresh_access_token(refresh_token)
+                save_tokens({**tokens, **refreshed})
+                page = await client.list_messages(top=top)
+            except GraphAuthError as exc:
+                log.error("Graph still rejected token after refresh: %s", exc)
+                raise HTTPException(
+                    status_code=401, detail=f"Outlook rejected the token: {exc}"
+                ) from exc
+            except GraphError as exc:
+                log.error("Graph error after refresh: %s", exc)
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
         except GraphError as exc:
-            log.error("Graph error after refresh: %s", exc)
+            log.error("Graph error on first call: %s", exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except GraphError as exc:
-        log.error("Graph error on first call: %s", exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    messages = [_summarize(m) for m in page.get("value", [])]
+        messages = [_summarize(m) for m in page.get("value", [])]
 
-    # Attach PO predictions when a trained classifier is available.
-    classifier = ClassifierService()
-    if classifier.is_ready:
-        for msg in messages:
-            prediction = classifier.predict(msg["id"] or "", msg["subject"], msg["preview"])
-            msg["predicted_label"] = prediction.predicted_label
-            msg["confidence"] = round(prediction.confidence, 3)
+        # Attach PO predictions when a trained classifier is available.
+        classifier = ClassifierService()
+        if classifier.is_ready:
+            for msg in messages:
+                prediction = classifier.predict(
+                    msg["id"] or "", msg["subject"], msg["preview"]
+                )
+                msg["predicted_label"] = prediction.predicted_label
+                msg["confidence"] = round(prediction.confidence, 3)
 
-    # Body extraction + table parsing run only for PO-predicted emails.
-    # Skipped entirely when no classifier has been trained.
-    if classifier.is_ready:
-        extractor = ExtractionService()
-        for msg in messages:
-            if msg.get("predicted_label") != "po":
-                continue
+        # Body extraction + table parsing run only for PO-predicted emails.
+        # Skipped entirely when no classifier has been trained.
+        if classifier.is_ready:
+            extractor = ExtractionService()
+            po_messages = [m for m in messages if m.get("predicted_label") == "po"]
 
-            body_text = f"{msg['subject']}\n{msg['preview']}"
+            # Fan out full-body fetches concurrently when the Extraction page
+            # asks for them. Sequential per-email fetches were the dominant
+            # cost; gather collapses N round-trips into ~1 round-trip wall time.
+            bodies: list[dict[str, Any] | None]
+            if include_tables and po_messages:
+                bodies = await _gather_bodies(client, [m["id"] for m in po_messages])
+            else:
+                bodies = [None] * len(po_messages)
 
-            # When the Extraction page asks for it, fetch the full HTML body
-            # and replace the preview-based text with the real body.
-            if include_tables:
-                try:
-                    full = await client.get_message(msg["id"])
-                except (GraphAuthError, GraphError) as exc:
-                    log.warning("full-body fetch failed for %s: %s", msg["id"], exc)
-                else:
+            for msg, full in zip(po_messages, bodies, strict=True):
+                body_text = f"{msg['subject']}\n{msg['preview']}"
+                if full is not None:
                     body = full.get("body") or {}
                     content = body.get("content", "")
                     if body.get("contentType", "").lower() == "html":
@@ -119,10 +122,12 @@ async def live_inbox(
                     if rows:
                         msg["table_rows"] = rows
 
-            result = extractor.extract(msg["id"] or "", body_text, attachment_paths=[])
-            if result.fields:
-                msg["extracted_fields"] = result.fields
-                msg["field_provenance"] = result.field_provenance
+                result = extractor.extract(
+                    msg["id"] or "", body_text, attachment_paths=[]
+                )
+                if result.fields:
+                    msg["extracted_fields"] = result.fields
+                    msg["field_provenance"] = result.field_provenance
 
     log.info(
         "inbox fetch OK | %s message(s) | classified=%s | tables=%s",
@@ -133,3 +138,24 @@ async def live_inbox(
         "messages": messages,
         "classified": classifier.is_ready,
     }
+
+
+async def _gather_bodies(
+    client: GraphClient, message_ids: list[str]
+) -> list[dict[str, Any] | None]:
+    """Concurrently fetch full message bodies; ``None`` for any that failed."""
+    results = await asyncio.gather(
+        *(client.get_message(mid) for mid in message_ids),
+        return_exceptions=True,
+    )
+    bodies: list[dict[str, Any] | None] = []
+    for mid, res in zip(message_ids, results, strict=True):
+        if isinstance(res, (GraphAuthError, GraphError)):
+            log.warning("full-body fetch failed for %s: %s", mid, res)
+            bodies.append(None)
+        elif isinstance(res, BaseException):
+            log.warning("full-body fetch raised for %s: %r", mid, res)
+            bodies.append(None)
+        else:
+            bodies.append(res)
+    return bodies

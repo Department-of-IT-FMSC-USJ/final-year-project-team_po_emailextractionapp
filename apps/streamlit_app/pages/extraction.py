@@ -4,8 +4,12 @@ The classifier must be trained for anything to appear here, because we
 only extract from emails it flags as PO.
 """
 
+from datetime import datetime
+
 import httpx
 import streamlit as st
+
+from extraction import EXPORT_COLUMNS, build_export_csv, build_export_rows
 
 
 def _flatten(value) -> str:
@@ -110,23 +114,22 @@ def render(client: httpx.Client) -> None:
 
     st.success(f"{len(po_emails)} PO email(s) detected · {data['count']} scanned")
 
-    # Top-level table view of extracted fields per PO email.
-    rows = []
-    for m in po_emails:
-        fields = m.get("extracted_fields") or {}
-        rows.append(
-            {
-                "From": m.get("from_name") or m.get("from", ""),
-                "Subject": m.get("subject", ""),
-                "PO Number": _flatten(fields.get("po_number")),
-                "Supplier": _flatten(fields.get("supplier")),
-                "Date": _flatten(fields.get("date")),
-                "Amount": _flatten(fields.get("amount")),
-                "Items": _flatten(fields.get("item_codes")),
-                "Attachments": "📎" if m.get("has_attachments") else "",
-            }
-        )
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    # One row per parsed item — same schema as the CSV export.
+    export_rows = build_export_rows(po_emails)
+    st.dataframe(
+        export_rows,
+        use_container_width=True,
+        hide_index=True,
+        column_order=EXPORT_COLUMNS,
+    )
+
+    st.download_button(
+        label="📥 Export to CSV",
+        data=build_export_csv(po_emails),
+        file_name=f"po_emails_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        use_container_width=False,
+    )
 
     st.divider()
     st.subheader("Per-email details")

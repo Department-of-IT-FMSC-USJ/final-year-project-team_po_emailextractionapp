@@ -248,7 +248,15 @@ def _parse_one_table(table) -> list[dict[str, Any]]:
 
         item_type = _row_item_type(row, size_indices)
         if not item_type:
-            continue
+            # PO tables typically have an unlabeled first data row with the
+            # base quantities for each size. Treat any row whose non-size
+            # cells are all blank as "Base Qty" so it isn't lost.
+            non_size_text = [
+                cell.strip() for idx, cell in enumerate(row) if idx not in size_indices
+            ]
+            if any(non_size_text):
+                continue
+            item_type = "Base Qty"
 
         master_row = _empty_master_row()
         master_row["Type"] = po_type
