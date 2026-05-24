@@ -12,7 +12,12 @@
       "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"from cryptography.fernet import Fernet; print\\(Fernet.generate_key\\(\\).decode\\(\\)\\)\")",
       "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"from config.settings import settings; print\\('env loaded - key set:', bool\\(settings.token_encryption_key\\)\\); print\\('azure_client_id empty:', settings.azure_client_id == ''\\)\")",
       "PowerShell(git check-ignore .env)",
-      "PowerShell(\"---\")"
+      "PowerShell(\"---\")",
+      "Bash(ls c:/PO/tessaret/ c:/PO/tesseract/ 2>&1 | head -20; echo \"---\"; ls \"c:/Program Files/Tesseract-OCR/\" \"c:/Program Files \\(x86\\)/Tesseract-OCR/\" 2>&1 | head -10)",
+      "Read(//c/Program Files/**)",
+      "PowerShell($found = Get-Command tesseract -ErrorAction SilentlyContinue; if \\($found\\) { \"FOUND: $\\($found.Source\\)\" } else { \"tesseract not on PATH\" })",
+      "PowerShell(& \"C:\\\\Users\\\\strategyintern2\\\\AppData\\\\Local\\\\Programs\\\\Tesseract-OCR\\\\tesseract.exe\" --version 2>&1)",
+      "Bash(python -c ' *)"
     ]
   }
 }

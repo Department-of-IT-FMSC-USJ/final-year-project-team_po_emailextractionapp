@@ -9,6 +9,7 @@ the binary is not on PATH, set ``TESSERACT_CMD`` in .env.
 
 import io
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,16 @@ def _configure_tesseract() -> None:
     candidates.append(str(project_root / "tesseract" / "tesseract.exe"))
     candidates.append(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
     candidates.append(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe")
+    # Per-user installs land in LOCALAPPDATA — the UB-Mannheim Windows
+    # installer defaults here when the user picks "install for me only".
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        candidates.append(
+            str(Path(local_appdata) / "Programs" / "Tesseract-OCR" / "tesseract.exe")
+        )
+        candidates.append(
+            str(Path(local_appdata) / "Tesseract-OCR" / "tesseract.exe")
+        )
 
     for candidate in candidates:
         if candidate and Path(candidate).exists():
