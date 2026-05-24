@@ -5,8 +5,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from classifier.dataset import VALID_LABELS, add_label, label_counts
-from classifier.loader import load_classifier_metadata
+from classifier.dataset import VALID_LABELS, add_label, label_counts, labels_by_email
+from classifier.loader import METADATA_FILENAME, MODEL_FILENAME, load_classifier_metadata
 from classifier.service import ClassifierService
 from classifier.train import NotEnoughData, train_classifier
 from config.settings import settings
@@ -44,7 +44,12 @@ def add_training_label(payload: LabelIn):
 def classifier_status():
     """Report label counts and the trained model's metadata (if any)."""
     metadata = load_classifier_metadata(settings.classifier_model_path)
-    return {"trained": metadata is not None, "labels": label_counts(), "model": metadata}
+    return {
+        "trained": metadata is not None,
+        "labels": label_counts(),
+        "labeled_emails": labels_by_email(),
+        "model": metadata,
+    }
 
 
 @router.post("/train")
@@ -56,6 +61,29 @@ def train():
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     log.info("classifier trained: %s", metadata)
     return {"status": "trained", "model": metadata}
+
+
+@router.delete("/labels")
+def delete_labels():
+    """Delete every stored label (the model file is left untouched)."""
+    path = settings.classifier_labels_path
+    if path.exists():
+        path.unlink()
+    log.info("all labels deleted")
+    return {"status": "deleted", "labels": label_counts()}
+
+
+@router.delete("/model")
+def delete_model():
+    """Delete the trained model artifact (labels are kept)."""
+    removed = []
+    for filename in (MODEL_FILENAME, METADATA_FILENAME):
+        path = settings.classifier_model_path / filename
+        if path.exists():
+            path.unlink()
+            removed.append(filename)
+    log.info("model files deleted: %s", removed)
+    return {"status": "deleted", "removed": removed}
 
 
 @router.post("/predict")

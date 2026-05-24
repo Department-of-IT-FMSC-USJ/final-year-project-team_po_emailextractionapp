@@ -11,7 +11,7 @@ from typing import Any
 import joblib
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
 from classifier.dataset import NOT_PO_LABEL, PO_LABEL, load_labels
@@ -66,18 +66,17 @@ def train_classifier() -> dict[str, Any]:
             f"to train (have {n_po} PO, {n_not_po} non-PO)."
         )
 
+    # 80/20 stratified train/test split.
+    # Force at least 2 test samples so stratification keeps both classes.
+    n_test = max(2, round(0.2 * len(targets)))
+    X_train, X_test, y_train, y_test = train_test_split(
+        texts, targets, test_size=n_test, stratify=targets, random_state=42
+    )
+
     pipeline = _build_pipeline()
-
-    # Stratified cross-validation gives an honest accuracy estimate on
-    # the small hand-labeled set.
-    folds = min(5, n_po, n_not_po)
-    splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
-    cv_scores = cross_val_score(pipeline, texts, targets, cv=splitter, scoring="accuracy")
-    cv_accuracy = float(cv_scores.mean())
-
-    # Final model is fit on every labeled example.
-    pipeline.fit(texts, targets)
-    train_accuracy = float(pipeline.score(texts, targets))
+    pipeline.fit(X_train, y_train)
+    train_accuracy = float(pipeline.score(X_train, y_train))
+    test_accuracy = float(pipeline.score(X_test, y_test))
 
     model_dir = settings.classifier_model_path
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -90,9 +89,11 @@ def train_classifier() -> dict[str, Any]:
         "n_samples": len(targets),
         "n_po": n_po,
         "n_not_po": n_not_po,
-        "cv_folds": folds,
-        "cv_accuracy": cv_accuracy,
+        "split": "train_test_80_20",
+        "n_train": len(X_train),
+        "n_test": len(X_test),
         "train_accuracy": train_accuracy,
+        "test_accuracy": test_accuracy,
     }
     (model_dir / METADATA_FILENAME).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return metadata

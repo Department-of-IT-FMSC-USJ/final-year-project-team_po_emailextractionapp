@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     extraction_rules_path: Path = Path("./extraction/rules")
     extractor_version: str = "1.0.0"
     ocr_enabled: bool = True
+    # Path to the Tesseract executable. Leave blank to auto-detect (PATH +
+    # common Windows install locations).
+    tesseract_cmd: str = ""
 
 
 settings = Settings()

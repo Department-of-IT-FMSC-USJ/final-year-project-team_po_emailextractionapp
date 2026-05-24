@@ -1,25 +1,13 @@
-"""Inbox page — connect Outlook, view messages, and label them for training."""
+"""Inbox page — connect Outlook and view your messages.
+
+Labeling for training happens on the **Classifier** page; extracted
+fields and attachment OCR live on the **Extraction** page.
+"""
 
 import httpx
 import streamlit as st
 
 _PRED_BADGE = {"po": "🟢 PO", "not_po": "⚪ Not-PO"}
-
-
-def _save_label(client: httpx.Client, msg: dict, label: str) -> None:
-    resp = client.post(
-        "/classifier/labels",
-        json={
-            "email_id": msg.get("id", ""),
-            "subject": msg.get("subject", ""),
-            "body_text": msg.get("preview", ""),
-            "label": label,
-        },
-    )
-    if resp.is_success:
-        st.toast(f"Labeled as {_PRED_BADGE.get(label, label)}")
-    else:
-        st.error(f"Could not save label: {resp.text}")
 
 
 def render(client: httpx.Client) -> None:
@@ -78,14 +66,3 @@ def render(client: httpx.Client) -> None:
             preview = m.get("preview", "")
             if preview:
                 st.write(preview)
-
-            st.divider()
-            st.caption("Label this email to train the classifier:")
-            b1, b2 = st.columns(2)
-            eid = m.get("id", "")
-            with b1:
-                if st.button("✅ PO", key=f"po_{eid}", use_container_width=True):
-                    _save_label(client, m, "po")
-            with b2:
-                if st.button("❌ Not PO", key=f"notpo_{eid}", use_container_width=True):
-                    _save_label(client, m, "not_po")

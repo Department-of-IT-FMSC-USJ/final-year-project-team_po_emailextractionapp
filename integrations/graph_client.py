@@ -44,6 +44,22 @@ class GraphClient:
         self._client_secret = settings.azure_client_secret
         self._redirect_uri = settings.graph_redirect_uri
         self._scopes = settings.graph_scopes.split()
+        # Optional shared httpx client — set via ``async with GraphClient(...)``
+        # to amortize the TCP+TLS handshake across many calls.
+        self._http: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> "GraphClient":
+        # Connection pool tuned for the inbox fan-out (full-body fetches).
+        limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+        self._http = httpx.AsyncClient(
+            base_url=GRAPH_API_BASE, timeout=30.0, limits=limits
+        )
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     # --- OAuth / login -------------------------------------------------
 
@@ -157,20 +173,13 @@ class GraphClient:
     async def _graph_get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         if not self._access_token:
             raise GraphAuthError("GraphClient has no access token; sign in first.")
-        claims = self._decode_token_claims(self._access_token)
-        log.info(
-            "Graph GET %s | token: jwt=%s aud=%s tid=%s scp=%r idtyp=%s upn=%s",
-            path,
-            bool(claims),
-            claims.get("aud"),
-            claims.get("tid"),
-            claims.get("scp"),
-            claims.get("idtyp"),
-            claims.get("upn") or claims.get("unique_name") or claims.get("email"),
-        )
+        log.debug("Graph GET %s", path)
         headers = {"Authorization": f"Bearer {self._access_token}"}
-        async with httpx.AsyncClient(base_url=GRAPH_API_BASE, timeout=30.0) as client:
-            resp = await client.get(path, params=params, headers=headers)
+        if self._http is not None:
+            resp = await self._http.get(path, params=params, headers=headers)
+        else:
+            async with httpx.AsyncClient(base_url=GRAPH_API_BASE, timeout=30.0) as client:
+                resp = await client.get(path, params=params, headers=headers)
         if resp.status_code == 401:
             www_auth = resp.headers.get("www-authenticate", "")
             log.warning("Graph 401 on %s | www-authenticate=%s", path, www_auth)
@@ -186,11 +195,18 @@ class GraphClient:
     # --- Attachments (handled by the extraction step) ------------------
 
     async def list_attachments(self, message_id: str) -> list[dict[str, Any]]:
-        # TODO: implement with the extraction pipeline.
-        _ = message_id
-        return []
+        """Return metadata (id, name, contentType, size) for each attachment."""
+        params = {"$select": "id,name,size,contentType"}
+        result = await self._graph_get(f"/me/messages/{message_id}/attachments", params)
+        return result.get("value", [])
 
     async def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
-        # TODO: implement with the extraction pipeline.
-        _ = message_id, attachment_id
-        return b""
+        """Download one attachment's raw bytes (base64-decoded from Graph)."""
+        data = await self._graph_get(
+            f"/me/messages/{message_id}/attachments/{attachment_id}",
+            params={"$select": "id,name,contentType,size,contentBytes"},
+        )
+        content_b64 = data.get("contentBytes")
+        if not content_b64:
+            return b""
+        return base64.b64decode(content_b64)
