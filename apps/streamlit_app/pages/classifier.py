@@ -6,6 +6,86 @@ import streamlit as st
 _LABEL_NAMES = {"po": "PO", "not_po": "Not-PO"}
 _PRED_BADGE = {"po": "🟢 PO", "not_po": "⚪ Not-PO"}
 
+_METRIC_HELP = {
+    "Accuracy": "Overall correctness — fraction of all predictions that match the true label.",
+    "Precision": "Of emails the model called PO, how many actually were PO.",
+    "Recall": "Of emails that actually are PO, how many the model caught.",
+    "F1-score": "Harmonic mean of precision and recall — penalizes lopsided trade-offs.",
+}
+
+
+def _pct(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value * 100:.1f}%"
+
+
+def _render_model_details(model: dict) -> None:
+    """Headline accuracy + per-class precision/recall/F1 + confusion matrix."""
+    acc = model.get("test_accuracy")
+    macro_p = model.get("macro_precision")
+    macro_r = model.get("macro_recall")
+    macro_f1 = model.get("macro_f1")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Accuracy", _pct(acc), help=_METRIC_HELP["Accuracy"])
+    m2.metric("Precision (macro)", _pct(macro_p), help=_METRIC_HELP["Precision"])
+    m3.metric("Recall (macro)", _pct(macro_r), help=_METRIC_HELP["Recall"])
+    m4.metric("F1-score (macro)", _pct(macro_f1), help=_METRIC_HELP["F1-score"])
+
+    per_class = model.get("per_class") or {}
+    if per_class:
+        st.caption("Per-class metrics (on the held-out test split):")
+        rows = []
+        for label_key, label_display in _LABEL_NAMES.items():
+            stats = per_class.get(label_key) or {}
+            rows.append({
+                "Class": label_display,
+                "Precision": _pct(stats.get("precision")),
+                "Recall": _pct(stats.get("recall")),
+                "F1-score": _pct(stats.get("f1")),
+                "Support": stats.get("support", 0),
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    cm = model.get("confusion_matrix")
+    cm_labels = model.get("confusion_matrix_labels") or list(_LABEL_NAMES.keys())
+    if cm:
+        st.caption(
+            "Confusion matrix — rows are the **true** label, columns are the "
+            "model's **prediction**. Diagonal = correct, off-diagonal = errors."
+        )
+        # Pretty header rows: prefix true-label rows with their name, columns with predicted-label names.
+        header = ["True ↓ / Predicted →"] + [
+            f"Pred: {_LABEL_NAMES.get(lbl, lbl)}" for lbl in cm_labels
+        ]
+        body = []
+        for i, lbl in enumerate(cm_labels):
+            body.append(
+                {header[0]: f"True: {_LABEL_NAMES.get(lbl, lbl)}"}
+                | {header[j + 1]: int(cm[i][j]) for j in range(len(cm_labels))}
+            )
+        st.dataframe(body, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.write(f"**Trained at:** {model.get('trained_at', '')}")
+    st.write(
+        f"**Total labels:** {model.get('n_samples', 0)} "
+        f"({model.get('n_po', 0)} PO / {model.get('n_not_po', 0)} non-PO) "
+        f"· **train:** {model.get('n_train', 0)} "
+        f"· **test:** {model.get('n_test', 0)} "
+        f"· **split:** 80/20 stratified "
+        f"· **algorithm:** {model.get('algorithm', '')} "
+        f"· **train accuracy:** {_pct(model.get('train_accuracy'))}"
+    )
+
+    if not per_class and not cm:
+        st.info(
+            "Per-class precision/recall/F1 and the confusion matrix are only "
+            "available for models trained after this update. Click **Train model** "
+            "again to recompute them."
+        )
+
 
 def _save_label(client: httpx.Client, msg: dict, label: str) -> None:
     resp = client.post(
@@ -25,7 +105,7 @@ def _render_inbox_for_labeling(
     client: httpx.Client, labeled: dict[str, str]
 ) -> None:
     try:
-        resp = client.get("/inbox", params={"top": 25})
+        resp = client.get("/inbox", params={"top": 100})
     except httpx.HTTPError:
         st.warning("Could not reach the API to load emails.")
         return
@@ -126,20 +206,7 @@ def render(client: httpx.Client) -> None:
     model = status.get("model")
     if model:
         with st.expander("Current model details"):
-            acc = model.get("test_accuracy")
-            m1, m2, m3 = st.columns(3)
-            if acc is not None:
-                m1.metric("Test accuracy", f"{acc * 100:.0f}%")
-            m2.metric("Train samples", model.get("n_train", 0))
-            m3.metric("Test samples", model.get("n_test", 0))
-            st.write(f"**Trained at:** {model.get('trained_at', '')}")
-            st.write(
-                f"**Total labels:** {model.get('n_samples', 0)} "
-                f"({model.get('n_po', 0)} PO / {model.get('n_not_po', 0)} non-PO) "
-                f"· **split:** 80/20 stratified "
-                f"· **algorithm:** {model.get('algorithm', '')} "
-                f"· **train accuracy:** {model.get('train_accuracy', 0) * 100:.0f}%"
-            )
+            _render_model_details(model)
     else:
         st.caption("No model trained yet.")
 
