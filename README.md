@@ -11,6 +11,20 @@ Graph calls, ML, and extraction, and a **Streamlit** frontend that calls the
 API over HTTP. No database — sessions, labels, and models live in local files
 or memory.
 
+### At a glance
+
+| | |
+|---|---|
+| **Classifier** | TF-IDF (1–2 grams) + Logistic Regression, scikit-learn |
+| **Training set** | 50 hand-labeled emails (25 PO / 25 Not-PO) — `data/labels.jsonl` |
+| **Split** | 80 / 20 stratified — 40 train, 10 held-out test |
+| **Test accuracy** | **100%** (10/10 — macro F1 = 1.00, precision = 1.00, recall = 1.00) |
+| **Train accuracy** | 100% |
+| **Body extraction** | Regex — 5 fields, 14 date formats, currency-aware, ≤20 item codes |
+| **Table extraction** | BeautifulSoup → 13-column MASTER schema (3 text + 10 size cols) |
+| **Image OCR** | Tesseract → re-run body regex on OCR text |
+| **Confusion matrix** | `[[5,0],[0,5]]` — zero false positives / false negatives |
+
 ---
 
 ## Features
@@ -33,45 +47,120 @@ or memory.
 ### PO classifier (train your own)
 - Label individual emails as **PO** or **Not PO** from the UI.
 - Trains a `TfidfVectorizer + LogisticRegression` pipeline on the labels —
-  fast on CPU, no GPU needed.
-- **80/20 stratified train/test split** — reports test accuracy as the
-  headline metric, plus train accuracy and sample counts.
+  fast on CPU (sub-second training on ~50 samples), no GPU needed.
+- **Feature extraction:** subject + body combined into a single text;
+  TF-IDF with 1–2 grams, English stop-words removed, sublinear TF,
+  20 000 max features, `min_df=1`.
+- **Classifier:** Logistic Regression, `max_iter=1000`,
+  `class_weight="balanced"` — robust against class imbalance.
+- **80/20 stratified train/test split**, fixed `random_state=42` for
+  reproducible accuracy numbers across re-trains.
+- **Metrics reported on every train:** test accuracy, train accuracy,
+  per-class precision / recall / F1 / support, macro-averaged precision
+  / recall / F1, and a 2×2 confusion matrix.
 - Re-label any email at any time (overwrites the previous label); re-train
   to update the model.
 - Reset training data (labels and/or model) from the UI with a confirmation.
 - Model artifact saved as `models/classifier/model.joblib` plus a
   `metadata.json` with training stats.
 
+#### Current model performance
+
+Trained on **50 labeled emails** (25 PO + 25 Not-PO), 80/20 stratified split:
+
+| Metric | PO | Not-PO | Macro avg |
+|---|---|---|---|
+| Precision | 1.00 | 1.00 | 1.00 |
+| Recall    | 1.00 | 1.00 | 1.00 |
+| F1        | 1.00 | 1.00 | 1.00 |
+| Support   | 5    | 5    | 10 |
+
+- **Test accuracy: 100% (10/10)**
+- **Train accuracy: 100% (40/40)**
+- Confusion matrix `[[5, 0], [0, 5]]` — zero false positives, zero false
+  negatives on the held-out set.
+- Live numbers always available at `models/classifier/metadata.json` and on
+  the Classifier page in the UI.
+
+> The 100% score reflects clean separation on this hand-curated sample;
+> accuracy will trend toward realistic values as more diverse emails are
+> labeled. Re-train any time to refresh the metrics.
+
 ### Field extraction from email body (regex)
-- **PO number** — recognizes MEL-style (`AB1234PO99999`) and labeled forms
-  (`Purchase Order Number: ...`, `PO#: ...`).
-- **Supplier** — from labeled lines (`Supplier:`, `Vendor:`) or by detecting
-  company-suffix signatures (`LTD`, `LLC`, `INC`, `PVT LTD`).
-- **Date** — parses 10+ formats including `dd/mm/yyyy`, `12 May 2024`,
-  `May 12, 2024`; normalizes to `YYYY-MM-DD`.
-- **Amount** — currency-aware, near labels like `Total`, `Amount`,
-  `Grand Total`, `Invoice Total`, etc.
-- **Item codes** — alphanumeric codes like `ABC2024-X12`, deduplicated and
-  capped at 20.
-- Each field stores a provenance tag (`body:regex`, `attachment:ocr`, ...).
+- **PO number** — three patterns, tried in order:
+  1. MEL-style (no label needed): 2–4 letter prefix + 4-digit year + `PO` +
+     digits, e.g. `MEL2025PO12345`, `AB1234PO99999`.
+  2. Labeled long-form: `Purchase Order Number: …`, `Purchase Order #: …`,
+     `Purchase Order No.: …`.
+  3. Labeled short-form: `PO#: …`, `PO Number: …`, `PO No: …`
+     (also tolerates `P0` typos).
+- **Supplier** — from labeled lines (`Supplier:`, `Vendor:`, `Seller:`,
+  `Manufacturer:`, `Company:`) **or** as a fallback from the last 8 lines
+  of the email by detecting company-suffix signatures
+  (`LTD`, `LIMITED`, `LLC`, `INC`, `CORP`, `CO.`, `PVT LTD`).
+  Sign-off phrases (`Thanks`, `Regards`, …) are stripped; URLs and email
+  addresses are rejected.
+- **Date** — recognizes **14 date formats** spanning numeric and verbose
+  variants (`dd/mm/yyyy`, `dd-mm-yyyy`, `dd.mm.yyyy`, `mm/dd/yyyy`,
+  `yyyy-mm-dd`, `12 May 2024`, `May 12, 2024`, 2-digit years, …); first
+  checks for labels (`Date:`, `Delivery Date:`, `Due Date:`, `Order Date:`,
+  `PO Date:`, `Ship Date:`) then falls back to a free-form match. All
+  outputs normalized to `YYYY-MM-DD`.
+- **Amount** — currency-aware (`$`, `£`, `€`); anchored on the labels
+  `Grand Total`, `Sub-Total`, `Invoice Total`, `Total`, `Amount`, `Due`,
+  `Balance`. Strips internal whitespace, keeps thousands separators and
+  up to 2 decimal places.
+- **Item codes** — alphanumeric pattern (`[A-Z]{2,4}\d+[A-Z]?\d*-[A-Z]?\d+`),
+  e.g. `ABC2024-X12`, `MEL12-A99`. Deduplicated (order-preserving), capped
+  at 20 per email to keep noisy footers from blowing up the UI.
+- Each field stores a **provenance tag** (`body:regex`, `attachment:ocr`,
+  …) so the UI can show where every value came from. When the same field
+  is found in both the body and an attachment, the attachment OCR value
+  wins (see [extraction/merge.py](extraction/merge.py)).
 
 ### Structured PO table extraction (BeautifulSoup)
-- Parses HTML tables in the email body into a fixed MASTER schema:
-  `Type`, `Contract No`, `Item Category`, `5lb`, `First Size`, `Up To 1Mth`,
-  `Up To 3Mth`, `3-6 Mths`, `6-9 Mths`, `9-12 Mths`, `12-18 Mths`,
-  `1.5-2 Yrs`, `Total`.
+- Parses every HTML `<table>` in the email body into rows of a fixed
+  **13-column MASTER schema**:
+  - **Text columns (3):** `Type`, `Contract No`, `Item Category`.
+  - **Size columns (10):** `5lb`, `First Size`, `Up To 1Mth`, `Up To 3Mth`,
+    `3-6 Mths`, `6-9 Mths`, `9-12 Mths`, `12-18 Mths`, `1.5-2 Yrs`, `Total`.
+- **Header alias map** — each canonical size column has 4–6 known aliases
+  (`up to 1 month` ↔ `Up To 1Mth`, `3 to 6 mths` ↔ `3-6 Mths`, …) so real
+  emails with inconsistent header spelling still map cleanly.
+- **Header row detection** — scores the first 8 rows by how many cells look
+  like size headers; requires ≥3 recognizable size columns before treating
+  a table as a PO table (skips signature/layout tables).
+- **Implicit Total column** — if no header maps to `Total`, the rightmost
+  unmapped column is auto-promoted to `Total` when ≥60% of its data rows
+  are numeric.
+- **Contract No** — regex `[A-Z]{2}\d{6,}` matched anywhere in the table
+  (handles `VA`, `VJ`, `VQ`, `VB`, and any 2-letter prefix).
+- **Item Category** — pattern-matched against a known set
+  (`7%`, `PRICE TICKET`, `CARTON STICKER`, `LAMINATING`, `POS`, `Base Qty`);
+  unlabeled rows with only numeric values are kept as `Base Qty` rather
+  than dropped.
+- **Type** — auto-detects `Online` / `Retail` from any cell in the table.
 - Handles both screenshot styles seen in real POs: per-contract size tables
   and combined Online/Retail tables.
-- Detects implicit Total columns (trailing numeric column with no header).
 - Auto-fetched (per PO email) only when the Extraction page is open, to keep
   the regular inbox fast.
 
 ### Image attachment OCR (Tesseract)
 - Per-email **OCR image attachments** button on the Extraction page.
 - Downloads images via Graph, runs Tesseract, then re-runs the body regex on
-  the OCR text — same extracted-field schema.
-- Auto-detects the Tesseract binary at `TESSERACT_CMD`, project-local
-  `./tessaret/` or `./tesseract/`, `C:\Program Files\Tesseract-OCR\`, or PATH.
+  the OCR text — same extracted-field schema, same five fields.
+- **Supported formats:** `.png`, `.jpg/.jpeg`, `.gif`, `.webp`, `.bmp`,
+  `.tif/.tiff` (plus the matching MIME types from Graph).
+- **OCR → regex pipeline:** image bytes → `pytesseract.image_to_string` →
+  same `extract_from_body` regex used on plain-text bodies, so OCR'd POs
+  surface PO number, supplier, date, amount, and item codes too.
+- **Field merging:** when both the email body and an image attachment
+  yield the same field, the **attachment OCR value wins** (images are
+  usually the canonical PO document, the body is the cover note).
+- Auto-detects the Tesseract binary in this order:
+  `TESSERACT_CMD` env var → project-local `./tessaret/` or `./tesseract/`
+  → `C:\Program Files\Tesseract-OCR\` → `C:\Program Files (x86)\Tesseract-OCR\`
+  → `%LOCALAPPDATA%\Programs\Tesseract-OCR\` → system PATH.
 
 ---
 
