@@ -83,7 +83,7 @@ def render(client: httpx.Client) -> None:
 
     try:
         with st.spinner("Fetching emails and parsing PO tables..."):
-            resp = client.get("/inbox", params={"top": 50, "include_tables": True}, timeout=60.0)
+            resp = client.get("/inbox", params={"top": 100, "include_tables": True}, timeout=120.0)
     except httpx.HTTPError:
         st.warning("Could not reach the API. Is it running on port 8000?")
         return

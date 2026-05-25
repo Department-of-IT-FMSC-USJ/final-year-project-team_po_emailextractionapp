@@ -13,6 +13,8 @@ from fastapi import APIRouter, HTTPException, Query
 
 from apps.api.token_store import get_tokens, save_tokens
 from classifier.service import ClassifierService
+from extraction.image_tables import parse_tables_from_image_bytes
+from extraction.ocr import IMAGE_MIME_TYPES
 from extraction.service import ExtractionService
 from extraction.tables import html_to_text, parse_tables
 from integrations.graph_client import GraphAuthError, GraphClient, GraphError
@@ -108,8 +110,22 @@ async def live_inbox(
             else:
                 bodies = [None] * len(po_messages)
 
-            for msg, full in zip(po_messages, bodies, strict=True):
+            # Concurrently OCR image attachments for every PO email so any
+            # tables embedded as PNG/JPG land in the same MASTER schema as
+            # body tables. Skipped when include_tables is False (Inbox page).
+            attachment_rows: list[list[dict[str, Any]]]
+            if include_tables and po_messages:
+                attachment_rows = await _gather_attachment_table_rows(
+                    client, po_messages
+                )
+            else:
+                attachment_rows = [[] for _ in po_messages]
+
+            for msg, full, att_rows in zip(
+                po_messages, bodies, attachment_rows, strict=True
+            ):
                 body_text = f"{msg['subject']}\n{msg['preview']}"
+                rows: list[dict[str, Any]] = []
                 if full is not None:
                     body = full.get("body") or {}
                     content = body.get("content", "")
@@ -118,9 +134,13 @@ async def live_inbox(
                         rows = parse_tables(content)
                     else:
                         body_text = f"{msg['subject']}\n{content}"
-                        rows = []
-                    if rows:
-                        msg["table_rows"] = rows
+
+                # Body + image-attachment rows share the MASTER schema, so
+                # we just concatenate. The Streamlit view already groups by
+                # Contract No, which keeps the per-contract sections clean.
+                combined = rows + att_rows
+                if combined:
+                    msg["table_rows"] = combined
 
                 result = extractor.extract(
                     msg["id"] or "", body_text, attachment_paths=[]
@@ -159,3 +179,97 @@ async def _gather_bodies(
         else:
             bodies.append(res)
     return bodies
+
+
+async def _gather_attachment_table_rows(
+    client: GraphClient, messages: list[dict[str, Any]]
+) -> list[list[dict[str, Any]]]:
+    """For each message, OCR every image attachment into MASTER-schema rows.
+
+    Per-message tasks run concurrently across messages. Inside each
+    message, attachment downloads also run concurrently. Tesseract is
+    blocking, so each OCR call is dispatched to a thread via
+    :func:`asyncio.to_thread` to keep the event loop responsive.
+    """
+    log.info("attach.fanout.start po_emails=%d", len(messages))
+    tasks = [_attachment_rows_for_message(client, m) for m in messages]
+    results = await asyncio.gather(*tasks)
+    total = sum(len(r) for r in results)
+    with_rows = sum(1 for r in results if r)
+    log.info(
+        "attach.fanout.done po_emails=%d emails_with_rows=%d total_rows=%d",
+        len(messages), with_rows, total,
+    )
+    return results
+
+
+async def _attachment_rows_for_message(
+    client: GraphClient, msg: dict[str, Any]
+) -> list[dict[str, Any]]:
+    message_id = msg["id"]
+    subject = (msg.get("subject") or "")[:80]
+    if not msg.get("has_attachments"):
+        log.info("attach.skip msg=%s subject=%r reason=NO_ATTACHMENTS_FLAG", message_id, subject)
+        return []
+
+    try:
+        attachments = await client.list_attachments(message_id)
+    except (GraphAuthError, GraphError) as exc:
+        log.warning("attach.list_failed msg=%s subject=%r error=%s", message_id, subject, exc)
+        return []
+
+    log.info(
+        "attach.listed msg=%s subject=%r total=%d names=%s",
+        message_id, subject, len(attachments),
+        [a.get("name", "?") for a in attachments],
+    )
+
+    images = [
+        a
+        for a in attachments
+        if str(a.get("contentType", "")).lower() in IMAGE_MIME_TYPES
+    ]
+    if not images:
+        # Show what content types were seen so the user can extend IMAGE_MIME_TYPES
+        # if Outlook sent something unexpected (e.g. application/octet-stream).
+        ct_seen = sorted({str(a.get("contentType", "?")).lower() for a in attachments})
+        log.info(
+            "attach.skip msg=%s reason=NO_IMAGES content_types_seen=%s "
+            "(image_table OCR only runs on: %s)",
+            message_id, ct_seen, sorted(IMAGE_MIME_TYPES),
+        )
+        return []
+
+    log.info(
+        "attach.images msg=%s count=%d names=%s",
+        message_id, len(images), [a.get("name", "?") for a in images],
+    )
+
+    downloads = await asyncio.gather(
+        *(client.download_attachment(message_id, a["id"]) for a in images),
+        return_exceptions=True,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for att, blob in zip(images, downloads, strict=True):
+        name = att.get("name", "?")
+        if isinstance(blob, BaseException):
+            log.warning("attach.download_failed msg=%s att=%s error=%r", message_id, name, blob)
+            continue
+        if not blob:
+            log.warning("attach.download_empty msg=%s att=%s", message_id, name)
+            continue
+
+        log.info("attach.parse_start msg=%s att=%s bytes=%d", message_id, name, len(blob))
+        try:
+            parsed = await asyncio.to_thread(parse_tables_from_image_bytes, blob)
+        except Exception as exc:  # noqa: BLE001 — Tesseract may raise anything
+            log.warning("attach.parse_failed msg=%s att=%s error=%r", message_id, name, exc)
+            continue
+
+        log.info(
+            "attach.parse_done msg=%s att=%s rows_extracted=%d",
+            message_id, name, len(parsed),
+        )
+        rows.extend(parsed)
+    return rows

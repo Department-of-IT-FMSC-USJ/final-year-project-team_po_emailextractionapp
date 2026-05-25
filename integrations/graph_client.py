@@ -201,10 +201,16 @@ class GraphClient:
         return result.get("value", [])
 
     async def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
-        """Download one attachment's raw bytes (base64-decoded from Graph)."""
+        """Download one attachment's raw bytes (base64-decoded from Graph).
+
+        ``contentBytes`` lives on the derived ``microsoft.graph.fileAttachment``
+        type, so it can't be named in ``$select`` on the base attachment
+        endpoint (Graph returns HTTP 400). Fetch the full payload instead —
+        the field is included automatically for file attachments.
+        """
         data = await self._graph_get(
             f"/me/messages/{message_id}/attachments/{attachment_id}",
-            params={"$select": "id,name,contentType,size,contentBytes"},
+            params={},
         )
         content_b64 = data.get("contentBytes")
         if not content_b64:

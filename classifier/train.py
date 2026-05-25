@@ -11,6 +11,7 @@ from typing import Any
 import joblib
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
@@ -78,6 +79,29 @@ def train_classifier() -> dict[str, Any]:
     train_accuracy = float(pipeline.score(X_train, y_train))
     test_accuracy = float(pipeline.score(X_test, y_test))
 
+    # Per-class precision / recall / F1 + confusion matrix on the held-out
+    # set. Fixed label order keeps the confusion matrix orientation stable
+    # across re-trains (rows = true label, cols = predicted label).
+    label_order = [PO_LABEL, NOT_PO_LABEL]
+    y_pred = pipeline.predict(X_test)
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_test, y_pred, labels=label_order, zero_division=0
+    )
+    macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(
+        y_test, y_pred, labels=label_order, average="macro", zero_division=0
+    )
+    cm = confusion_matrix(y_test, y_pred, labels=label_order).tolist()
+
+    per_class_metrics = {
+        label: {
+            "precision": float(precision[i]),
+            "recall": float(recall[i]),
+            "f1": float(f1[i]),
+            "support": int(support[i]),
+        }
+        for i, label in enumerate(label_order)
+    }
+
     model_dir = settings.classifier_model_path
     model_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(pipeline, model_dir / MODEL_FILENAME)
@@ -94,6 +118,12 @@ def train_classifier() -> dict[str, Any]:
         "n_test": len(X_test),
         "train_accuracy": train_accuracy,
         "test_accuracy": test_accuracy,
+        "macro_precision": float(macro_precision),
+        "macro_recall": float(macro_recall),
+        "macro_f1": float(macro_f1),
+        "per_class": per_class_metrics,
+        "confusion_matrix": cm,
+        "confusion_matrix_labels": label_order,
     }
     (model_dir / METADATA_FILENAME).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return metadata

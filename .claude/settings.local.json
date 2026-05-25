@@ -12,7 +12,14 @@
       "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"from cryptography.fernet import Fernet; print\\(Fernet.generate_key\\(\\).decode\\(\\)\\)\")",
       "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"from config.settings import settings; print\\('env loaded - key set:', bool\\(settings.token_encryption_key\\)\\); print\\('azure_client_id empty:', settings.azure_client_id == ''\\)\")",
       "PowerShell(git check-ignore .env)",
-      "PowerShell(\"---\")"
+      "PowerShell(\"---\")",
+      "Bash(ls c:/PO/tessaret/ c:/PO/tesseract/ 2>&1 | head -20; echo \"---\"; ls \"c:/Program Files/Tesseract-OCR/\" \"c:/Program Files \\(x86\\)/Tesseract-OCR/\" 2>&1 | head -10)",
+      "Read(//c/Program Files/**)",
+      "PowerShell($found = Get-Command tesseract -ErrorAction SilentlyContinue; if \\($found\\) { \"FOUND: $\\($found.Source\\)\" } else { \"tesseract not on PATH\" })",
+      "PowerShell(& \"C:\\\\Users\\\\strategyintern2\\\\AppData\\\\Local\\\\Programs\\\\Tesseract-OCR\\\\tesseract.exe\" --version 2>&1)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('classifier/train.py'\\).read\\(\\)\\); ast.parse\\(open\\('apps/streamlit_app/pages/classifier.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"from extraction import EXPORT_COLUMNS, build_export_rows; from extraction.quality import score_row; print\\('OK columns:', len\\(EXPORT_COLUMNS\\)\\); print\\('Accuracy idx:', EXPORT_COLUMNS.index\\('Accuracy'\\)\\); r=score_row\\({'Subject':'PO 123','From':'a@b.com','Date':'2026-05-25','PO Numbers':'MEL2025PO1','Score':18.0,'Body Preview':'hi','Contract No':'VA123456','Type':'Online','Item Category':'POS','5lb':1.0,'First Size':2.0,'Total':3.0}\\); print\\('full row score:', r\\); print\\('blank row:', score_row\\({'Score':10.86}\\)\\)\")"
     ]
   }
 }

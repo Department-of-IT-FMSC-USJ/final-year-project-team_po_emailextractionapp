@@ -26,7 +26,7 @@ def render(client: httpx.Client) -> None:
         st.button("Refresh", use_container_width=True)
 
     try:
-        resp = client.get("/inbox", params={"top": 25})
+        resp = client.get("/inbox", params={"top": 100})
     except httpx.HTTPError:
         st.warning("Could not reach the API. Is it running on port 8000?")
         return
