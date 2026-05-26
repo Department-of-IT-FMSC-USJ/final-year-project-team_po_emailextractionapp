@@ -9,30 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# --- PO number --------------------------------------------------------
-
-_PO_PATTERNS: list[re.Pattern[str]] = [
-    # MEL-style and similar: 2-4 letter prefix + 4-digit year + "PO" + digits
-    # e.g. MEL2025PO12345
-    re.compile(r"\b[A-Z]{2,4}\d{4}PO\d+\b", re.IGNORECASE),
-    # Labeled: "Purchase Order Number: XXX" / "Purchase Order #: XXX"
-    re.compile(
-        r"\bPurchase\s*Order\s*(?:Number|No\.?|#)?\s*[:\-]\s*([A-Z0-9\-]{3,})\b",
-        re.IGNORECASE,
-    ),
-    # Labeled: "PO#: XXX" / "PO Number: XXX"
-    re.compile(r"\bP[O0]\s*(?:Number|No\.?|#)?\s*[:\-]\s*([A-Z0-9\-]{3,})\b", re.IGNORECASE),
-]
-
-
-def _extract_po_number(text: str) -> str | None:
-    for pat in _PO_PATTERNS:
-        match = pat.search(text)
-        if match:
-            return (match.group(1) if match.groups() else match.group(0)).upper()
-    return None
-
-
 # --- Supplier ---------------------------------------------------------
 
 _SUPPLIER_PATTERN = re.compile(
@@ -171,9 +147,6 @@ def extract_from_body(
     fields: dict[str, Any] = {}
     provenance: dict[str, str] = {}
 
-    if (po := _extract_po_number(text)) is not None:
-        fields["po_number"] = po
-        provenance["po_number"] = "body:regex"
     if (supplier := _extract_supplier(text)) is not None:
         fields["supplier"] = supplier
         provenance["supplier"] = "body:regex"

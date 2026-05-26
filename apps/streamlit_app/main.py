@@ -7,7 +7,6 @@ from apps.streamlit_app import theme
 from apps.streamlit_app.pages import classifier as classifier_page
 from apps.streamlit_app.pages import extraction as extraction_page
 from apps.streamlit_app.pages import inbox
-from apps.streamlit_app.pages import settings as settings_page
 from config.settings import settings
 
 st.set_page_config(
@@ -23,7 +22,6 @@ _PAGES = {
     "Inbox": ("📥", inbox.render),
     "Classifier": ("🧠", classifier_page.render),
     "Extraction": ("📤", extraction_page.render),
-    "Settings": ("⚙️", settings_page.render),
 }
 
 

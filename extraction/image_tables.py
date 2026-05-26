@@ -48,11 +48,22 @@ try:
 except ImportError:
     _OCR_LIBS = False
 
-# Filter low-confidence OCR tokens (Tesseract -1 means "no confidence reported").
-_MIN_CONFIDENCE = 30
+# Keep every Tesseract token that has *any* reported confidence; only
+# drop -1 ("no confidence assigned", typically layout-only artifacts).
+# Higher thresholds were silently dropping short numeric / symbol tokens
+# (the "7" and "%" of a "7%" row label, single-cell digits like "12")
+# that came back with conf in the low single digits.
+_MIN_CONFIDENCE = 0
 # Column binning tolerance as a fraction of image width. ~6% works well
 # for typical 10-column PO tables; clamped to a minimum of 40 px.
 _BIN_TOLERANCE_FRAC = 0.06
+# When refining column centers from data rows, accept the new median
+# only if ≥ this many data values support it.
+_REFINE_MIN_SUPPORT = 2
+# A data value is treated as a likely decimal-point-loss casualty when
+# it exceeds the column's median by this factor (5× picked empirically
+# — typical PO tables have intra-column ratios of <3×).
+_DECIMAL_LOSS_RATIO = 5.0
 
 
 def parse_tables_from_image_bytes(image_bytes: bytes) -> list[dict[str, Any]]:
@@ -139,6 +150,12 @@ def parse_tables_from_image_bytes(image_bytes: bytes) -> list[dict[str, Any]]:
             inferred = _infer_total_column(data_lines, columns, bin_tolerance)
             if inferred:
                 columns = sorted(columns + [inferred], key=lambda c: c[1])
+
+        # Refine each column's anchor using the actual data-row x-positions.
+        # Header phrase centers can be off by ~half a column width on
+        # narrow 10-column layouts; this catches those drifts before
+        # we start binning data.
+        columns = _refine_column_centers(data_lines, columns, bin_tolerance)
 
         log.info(
             "image_table.parse_table[%d] header_line=%d data_lines=%d "
@@ -397,6 +414,97 @@ def _infer_total_column(
     return ("Total", median_x)
 
 
+def _refine_column_centers(
+    data_lines: list[list[dict]],
+    columns: list[tuple[str, float]],
+    initial_tolerance: int,
+) -> list[tuple[str, float]]:
+    """Snap each column's x-center to the median of data values that bin to it.
+
+    Header phrases like ``Up To 1Mth`` span multiple words; their average
+    x-center can drift from the column's visual center. Data row values
+    are well-aligned within a column, so re-deriving each column's anchor
+    from the data's actual distribution catches cases where the header
+    average is off by half a column's width — the root cause of silent
+    drops in narrow / 10-column tables.
+
+    The refinement pass uses a 2× tolerance for the initial nearest-column
+    assignment so values that fell just outside the strict bin still get
+    a vote. It only adopts the refined center when ≥ _REFINE_MIN_SUPPORT
+    values support it AND the resulting shift stays within the original
+    tolerance — preventing one outlier value from dragging a sparse
+    column's anchor away from where the header placed it.
+    """
+    if not columns or not data_lines:
+        return columns
+
+    column_xs = [c[1] for c in columns]
+    column_names = [c[0] for c in columns]
+    refine_tolerance = initial_tolerance * 2
+    cluster_xs: list[list[float]] = [[] for _ in columns]
+    for line in data_lines:
+        for w in line:
+            if _to_float(w["text"]) is None:
+                continue
+            nearest = min(
+                range(len(column_xs)),
+                key=lambda i: abs(column_xs[i] - w["x_center"]),
+            )
+            if abs(column_xs[nearest] - w["x_center"]) <= refine_tolerance:
+                cluster_xs[nearest].append(w["x_center"])
+
+    refined: list[tuple[str, float]] = []
+    for name, old_x, xs in zip(column_names, column_xs, cluster_xs, strict=True):
+        if len(xs) >= _REFINE_MIN_SUPPORT:
+            xs.sort()
+            new_x = xs[len(xs) // 2]
+            if abs(new_x - old_x) <= initial_tolerance:
+                refined.append((name, new_x))
+                continue
+        refined.append((name, old_x))
+    return refined
+
+
+def _maybe_recover_decimal(value: float, column_median: float | None) -> float:
+    """Try to recover a value where Tesseract dropped the decimal point.
+
+    Targets the specific failure where ``1551.50`` is OCR'd as ``155150``.
+    Conditions, all must hold (deliberately conservative — false fixes
+    on a Total column would silently corrupt CSV exports):
+
+    * Integer representation is ≥5 digits — guards against fixing
+      legitimately-small numbers like ``6100`` (a real PO total).
+    * Raw value is >5× the column median (it really does look like
+      an outlier).
+    * Candidate value (decimal re-inserted 2 places from the right)
+      lands within a factor of 3 of the column median — i.e. it's in
+      the column's normal distribution.
+
+    The last check is what protects the Total column: a row that has
+    Total=6100 in a column of Totals like ``[360, 360, 6100]`` triggers
+    the magnitude test (6100 / median 360 = 17×), but the candidate
+    ``61`` sits at 0.17× of the median, so the candidate-fit check
+    rejects the fix.
+    """
+    if column_median is None or column_median <= 0 or value <= 0:
+        return value
+    if value / column_median < _DECIMAL_LOSS_RATIO:
+        return value
+    text = f"{value:.0f}"
+    if len(text) < 5:
+        return value
+    candidate_str = text[:-2] + "." + text[-2:]
+    try:
+        candidate = float(candidate_str)
+    except ValueError:
+        return value
+    # Candidate must land within a factor of 3 of the column median.
+    fix_ratio = max(candidate, column_median) / max(min(candidate, column_median), 1e-9)
+    if fix_ratio <= 3.0:
+        return candidate
+    return value
+
+
 # --- Per-table scans -----------------------------------------------------
 
 
@@ -430,8 +538,33 @@ def _parse_data_lines(
     leftmost_x = size_columns[0][1]
     column_xs = [c[1] for c in size_columns]
     column_names = [c[0] for c in size_columns]
-    rows: list[dict[str, Any]] = []
 
+    # First pass: gather per-column value distributions so the second
+    # pass can sanity-check individual values against their column's
+    # typical magnitude (catches decimal-point losses like 1551.50 ->
+    # 155150 that Tesseract sometimes produces).
+    column_values: list[list[float]] = [[] for _ in size_columns]
+    for line in data_lines:
+        for w in line:
+            value = _to_float(w["text"])
+            if value is None:
+                continue
+            nearest = min(
+                range(len(column_xs)),
+                key=lambda i: abs(column_xs[i] - w["x_center"]),
+            )
+            if abs(column_xs[nearest] - w["x_center"]) > tolerance:
+                continue
+            column_values[nearest].append(value)
+    column_medians: list[float | None] = []
+    for vals in column_values:
+        if vals:
+            sorted_vals = sorted(vals)
+            column_medians.append(sorted_vals[len(sorted_vals) // 2])
+        else:
+            column_medians.append(None)
+
+    rows: list[dict[str, Any]] = []
     for line in data_lines:
         label_words = [w for w in line if w["x_center"] < leftmost_x - tolerance]
         data_words = [w for w in line if w["x_center"] >= leftmost_x - tolerance]
@@ -454,13 +587,13 @@ def _parse_data_lines(
             value = _to_float(w["text"])
             if value is None:
                 continue
-            # Snap to the nearest header column by x-center.
             nearest_idx = min(
                 range(len(column_xs)),
                 key=lambda i: abs(column_xs[i] - w["x_center"]),
             )
             if abs(column_xs[nearest_idx] - w["x_center"]) > tolerance:
                 continue
+            value = _maybe_recover_decimal(value, column_medians[nearest_idx])
             master_row[column_names[nearest_idx]] = value
             any_value = True
 
