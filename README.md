@@ -16,14 +16,19 @@ or memory.
 | | |
 |---|---|
 | **Classifier** | TF-IDF (1–2 grams) + Logistic Regression, scikit-learn |
-| **Training set** | 50 hand-labeled emails (25 PO / 25 Not-PO) — `data/labels.jsonl` |
-| **Split** | 80 / 20 stratified — 40 train, 10 held-out test |
-| **Test accuracy** | **100%** (10/10 — macro F1 = 1.00, precision = 1.00, recall = 1.00) |
-| **Train accuracy** | 100% |
+| **Raw labels** | 62 hand-labeled emails — `data/labels.jsonl` |
+| **After cleaning** | 0 empty dropped, **2 duplicates dropped** → **60 unique** (29 PO / 31 Not-PO) |
+| **Train / test split** | Time-based — **oldest 48 → train pool**, **newest 12 → held-out test** (never seen during fit or CV) |
+| **Headline (test set)** | **Accuracy 83.3% (10 / 12)**, macro F1 0.829, macro precision 0.875, macro recall 0.833 |
+| **Confusion (test)** | `[[6, 0], [2, 4]]` — **0 false negatives, 2 false positives** (both Non-PO → PO, both at <60% confidence) |
+| **CV stability (train pool only)** | Stratified 5-fold inside the 48-email pool — **100.0% ± 0.0%** accuracy, **1.000 ± 0.000** macro F1. Still perfect because the hard examples sit in the test set, not the pool. |
+| **Metadata coverage** | 12 / 60 labels carry `received_at`, 12 / 60 carry `from_addr` — time basis = `mixed` |
+| **Misclassified** | 2 FPs surfaced — complaint email referencing "PO-5312" and a quote request — both fired at near-boundary confidence |
+| **Live unseen-inbox check** | 13 inbox emails unseen during training, mean confidence **59.9%** (max 65.3%) — model knows it's unsure on truly fresh email |
+| **Deployed model** | The model scored on the test set is the one that ships (no separate "fit on 100%" variant) |
 | **Body extraction** | Regex — 5 fields, 14 date formats, currency-aware, ≤20 item codes |
 | **Table extraction** | BeautifulSoup → 13-column MASTER schema (3 text + 10 size cols) |
 | **Image OCR** | Tesseract → re-run body regex on OCR text |
-| **Confusion matrix** | `[[5,0],[0,5]]` — zero false positives / false negatives |
 
 ---
 
@@ -45,6 +50,7 @@ or memory.
   prediction badge with confidence.
 
 ### PO classifier (train your own)
+
 - Label individual emails as **PO** or **Not PO** from the UI.
 - Trains a `TfidfVectorizer + LogisticRegression` pipeline on the labels —
   fast on CPU (sub-second training on ~50 samples), no GPU needed.
@@ -53,38 +59,220 @@ or memory.
   20 000 max features, `min_df=1`.
 - **Classifier:** Logistic Regression, `max_iter=1000`,
   `class_weight="balanced"` — robust against class imbalance.
-- **80/20 stratified train/test split**, fixed `random_state=42` for
-  reproducible accuracy numbers across re-trains.
-- **Metrics reported on every train:** test accuracy, train accuracy,
-  per-class precision / recall / F1 / support, macro-averaged precision
-  / recall / F1, and a 2×2 confusion matrix.
+
+#### Training architecture — train pool / held-out test, CV inside pool only
+
+The pipeline follows a strict train / validation / test discipline:
+
+1. **Load + clean.** Drop records where both the subject and body are
+   empty (nothing to learn from).
+2. **Deduplicate** by normalized (subject + body) text. Forwarded POs
+   that hit the inbox three times with three different Outlook IDs
+   collapse to one record (newest `received_at` / `labeled_at` wins).
+3. **Sort by time** — `received_at` if present, else `labeled_at` as
+   fallback.
+4. **Time-based train pool / test split.** The **newest 20%** becomes
+   the **final test set** — never used during fitting, CV, or tuning.
+   The older 80% is the **train pool**. Refuses to train if either side
+   loses a class.
+5. **Cross-validation lives inside the train pool only.** Used as a
+   model-selection / stability check, never as the headline number.
+   - **`StratifiedGroupKFold` by sender** auto-activates once ≥80% of
+     train-pool labels carry `from_addr` (with ≥2 distinct senders) —
+     emails from the same supplier never straddle a fold, which catches
+     "same template" leakage that random folds miss.
+   - Falls back to **`StratifiedKFold`** when sender info isn't yet
+     available (e.g. labels created before sender capture was added).
+6. **Fit one model on the train pool**, score it on the held-out test
+   set. Those test metrics are the **headline accuracy / precision /
+   recall / F1 / confusion matrix**. The model artifact written to
+   `models/classifier/model.joblib` is the *same model* that produced
+   those numbers — no separate "fit on 100%" variant to muddy the
+   story.
+7. **Misclassified test examples** (FP and FN) are written into
+   `metadata.json` with confidence, sender, and received-at, and
+   surfaced in the UI for manual review.
+8. **Split before preprocessing.** TF-IDF lives inside the sklearn
+   `Pipeline` so the vocabulary, IDF weights and stop-word list never
+   see evaluation data — `Pipeline.fit()` is called per fold / per
+   split.
+
+This maps 1-to-1 onto the standard ML hygiene checklist:
+
+| Best practice | How it's enforced |
+|---|---|
+| Don't test on training emails | Final test set held out before fit; CV inside train pool only |
+| Split before preprocessing | TF-IDF inside `Pipeline`, refit per fold |
+| Remove duplicates before splitting | `_deduplicate()` by normalized text |
+| Avoid random splits when senders correlate | `StratifiedGroupKFold` by `from_addr` when coverage allows |
+| Prefer time-based test split | Sort by `received_at` (or `labeled_at`); newest 20% is test |
+| Separate final test set | Never enters CV; only scored once at the end |
+| CV used only for model selection / stability | Reported as a secondary stability number, not the headline |
+| Report accuracy, precision, recall, F1, confusion | All five, per class + macro, on both test and CV |
+| Track FP / FN | `misclassified_test` list saved in metadata, with kind / confidence / sender |
+| Don't trust 100% blindly | UI shows a "add hard examples" hint when test ≥99% on a small set |
+
 - Re-label any email at any time (overwrites the previous label); re-train
   to update the model.
 - Reset training data (labels and/or model) from the UI with a confirmation.
 - Model artifact saved as `models/classifier/model.joblib` plus a
-  `metadata.json` with training stats.
+  `metadata.json` with all training stats.
 
 #### Current model performance
 
-Trained on **50 labeled emails** (25 PO + 25 Not-PO), 80/20 stratified split:
+Starting from **62 hand-labeled emails**, the pipeline drops 0 empty and
+**2 duplicate** forwarded POs, leaving **60 unique labels: 29 PO + 31
+Not-PO**. The 12 newest emails — many of them adversarial cases
+(complaints referencing a PO, quote requests, ambiguous wording) —
+were added after the previous training round.
 
-| Metric | PO | Not-PO | Macro avg |
+The 60 records are sorted oldest-first by `received_at` where available
+(12 of 60) and by `labeled_at` for older records — `time_basis` reports
+as `"mixed"`. The **newest 12** form the held-out test set; the
+**oldest 48** form the train pool.
+
+##### Headline — held-out test set
+
+The reported model never saw these 12 emails during fit or CV.
+
+| | PO | Not-PO | Macro avg |
 |---|---|---|---|
-| Precision | 1.00 | 1.00 | 1.00 |
-| Recall    | 1.00 | 1.00 | 1.00 |
-| F1        | 1.00 | 1.00 | 1.00 |
-| Support   | 5    | 5    | 10 |
+| Precision | 0.75 | 1.00 | **0.875** |
+| Recall    | 1.00 | 0.67 | **0.833** |
+| F1        | 0.857 | 0.800 | **0.829** |
+| Support   | 6    | 6    | 12 |
 
-- **Test accuracy: 100% (10/10)**
-- **Train accuracy: 100% (40/40)**
-- Confusion matrix `[[5, 0], [0, 5]]` — zero false positives, zero false
-  negatives on the held-out set.
-- Live numbers always available at `models/classifier/metadata.json` and on
-  the Classifier page in the UI.
+- **Accuracy: 83.3% (10 / 12 correct)**
+- **Confusion `[[6, 0], [2, 4]]`** — 6 PO correctly called PO, **0 false
+  negatives** (every actual PO was caught), **2 false positives**
+  (Non-PO predicted as PO), 4 Not-PO correctly called Not-PO.
 
-> The 100% score reflects clean separation on this hand-curated sample;
-> accuracy will trend toward realistic values as more diverse emails are
-> labeled. Re-train any time to refresh the metrics.
+The error pattern is asymmetric: the model **catches every PO** but
+**over-predicts PO** when an email's vocabulary brushes against PO
+territory.
+
+##### Misclassified test emails
+
+| # | Kind | Confidence | True | Pred | Subject |
+|---|------|------------|------|------|---------|
+| 1 | False positive (Non-PO → PO) | **52%** | Not-PO | PO | *Issue with items supplied under PO-5312* |
+| 2 | False positive (Non-PO → PO) | **56%** | Not-PO | PO | *Request for quotation - toner cartridges* |
+
+Both are textbook hard examples the README/UI predicted would surface:
+
+- (1) is a **complaint about an existing PO** — the email *mentions* a
+  PO number but isn't itself a purchase order. TF-IDF picks up the
+  "PO-5312" reference and tips the linear model over.
+- (2) is a **quotation request** — the buyer asking the supplier
+  *to quote*, not an order. Vocabulary overlaps with real orders
+  ("toner cartridges", units, urgency words).
+
+Both mistakes fired at **near-decision-boundary confidence (52% and
+56%)**, which is the healthiest possible failure mode: the model isn't
+wrong with conviction, it's wrong while admitting it doesn't know.
+These two emails are the **highest-value relabels** to feed into the
+next training round.
+
+##### Cross-validation on the train pool
+
+CV is the secondary stability signal — run only on the 48-email train
+pool, **never on the test set**.
+
+| | |
+|---|---|
+| Strategy | `StratifiedKFold`, `shuffle=True`, `random_state=42` |
+| Folds (k) | 5 (auto-clamped to `min(5, n_po, n_not_po, distinct_groups)`) |
+| Train-pool size per fold | 38 train / 10 val (with stratification) |
+| Per-fold accuracy | 100%, 100%, 100%, 100%, 100% |
+| **Accuracy (mean ± std)** | **100.0% ± 0.0%** |
+| Per-fold macro F1 | 1.000, 1.000, 1.000, 1.000, 1.000 |
+| **Macro F1 (mean ± std)** | **1.000 ± 0.000** |
+| OOF support | 23 PO + 25 Not-PO = 48 (every train-pool email predicted exactly once by a model that didn't see it) |
+| OOF confusion | `[[23, 0], [0, 25]]` — 0 false positives, 0 false negatives |
+
+CV will auto-upgrade to **`StratifiedGroupKFold` by sender** the moment
+`from_addr` coverage on the train pool crosses ≥80% (currently 0 / 48
+on the train pool — the 12 labels that carry sender info all landed in
+the newest-20% test set this round). Group-based CV stops emails from
+the same supplier from straddling a fold — the strictest random-CV
+correction for sender-clustered corpora.
+
+##### Why is CV still 100% while the test set is 83%?
+
+This gap is real and explainable, not a bug. The **10 newly-labeled
+hard examples** (complaints, quotes, ambiguous PO-ish emails) were
+added most recently, so they sorted to the newest 20% by time and
+landed in the **held-out test set**. The 48 emails in the train pool
+are still the clean, easily-separable set the model learned in earlier
+rounds — so CV inside that pool stays perfect.
+
+As you keep labeling, today's test emails will age into older positions,
+shift into the train pool, and CV will start dropping below 100% too —
+which is the correct dynamic. The test number is the honest one
+*right now*; CV will become a more useful stability indicator as the
+hard examples propagate into the training data.
+
+This is the architecture working as designed:
+
+- **Test is the headline** — it's the only number that reflects "predict
+  on emails the model has never seen, including the hardest ones".
+- **CV is a stability check** — it tells you whether the training pool
+  itself is internally consistent. 100% here means "the model fits the
+  train pool perfectly with no train/val variance", which is fine; the
+  pool just isn't yet a hard distribution.
+
+##### Live unseen-inbox check
+
+After every training run the API also predicts the **current inbox
+emails that aren't in `labels.jsonl`**. No ground truth, so no accuracy
+— but the confidence distribution is the strongest signal we have for
+out-of-distribution behavior.
+
+| | |
+|---|---|
+| Inbox fetched | 50 |
+| Unseen (not in labels) | **13** |
+| Predicted PO | 10 / 13 |
+| Predicted Not-PO | 3 / 13 |
+| **Mean confidence** | **59.9%** |
+| Min confidence | 51.9% |
+| Max confidence | **65.3%** |
+
+Confidence histogram:
+
+| Bucket | Count |
+|---|---|
+| 50–60% | 4 |
+| 60–70% | 9 |
+| 70–80% | 0 |
+| 80–90% | 0 |
+| 90–100% | 0 |
+
+**Nothing crosses 70%.** That's a huge drop from the labeled corpus,
+where everything in CV / train fits with 100% confidence. Two
+interpretations, both compatible:
+
+- The labeled corpus is still **narrower than the real inbox**.
+- The model is **calibrated honestly**: it knows it doesn't know.
+
+Either way, every email with <60% confidence (currently 4) is the
+single best thing to label next — they sit closest to the decision
+boundary and carry the most information per label.
+
+##### Next steps
+
+1. **Relabel the 2 misclassified test emails** ("Issue with items
+   supplied under PO-5312", "Request for quotation - toner
+   cartridges"). Once they're in the train pool, the model will learn
+   that PO-mention ≠ PO.
+2. **Label the 4 lowest-confidence unseen emails** (all <55% confident).
+   These directly inform the next CV round.
+3. **Watch CV drop below 100%** as the hard examples propagate from
+   "newest" into "oldest" through subsequent training rounds — that's
+   the signal that the train pool itself is no longer trivial.
+
+Live numbers always at `models/classifier/metadata.json` and on the
+Classifier page in the UI.
 
 ### Field extraction from email body (regex)
 - **PO number** — three patterns, tried in order:

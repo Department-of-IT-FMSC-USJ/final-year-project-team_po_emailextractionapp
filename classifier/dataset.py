@@ -2,10 +2,15 @@
 
 Each line is one labeled email::
 
-    {"email_id", "subject", "body_text", "label", "labeled_at"}
+    {"email_id", "subject", "body_text", "label",
+     "labeled_at", "received_at", "from_addr"}
 
 ``label`` is either ``"po"`` or ``"not_po"``. Re-labeling an email
-overwrites its previous entry.
+overwrites its previous entry. ``received_at`` is the email's actual
+receive timestamp from Graph (used by training's time-based test
+holdout). ``from_addr`` is the sender address (used as the group key
+for group-based cross-validation). Both fields are optional for
+back-compat with older records.
 """
 
 import json
@@ -42,7 +47,14 @@ def load_labels() -> list[dict[str, Any]]:
     return records
 
 
-def add_label(email_id: str, subject: str, body_text: str, label: str) -> dict[str, Any]:
+def add_label(
+    email_id: str,
+    subject: str,
+    body_text: str,
+    label: str,
+    received_at: str | None = None,
+    from_addr: str | None = None,
+) -> dict[str, Any]:
     """Store (or replace) the label for one email and return the record."""
     if label not in VALID_LABELS:
         raise ValueError(f"label must be one of {sorted(VALID_LABELS)}")
@@ -53,6 +65,8 @@ def add_label(email_id: str, subject: str, body_text: str, label: str) -> dict[s
         "body_text": body_text,
         "label": label,
         "labeled_at": datetime.now(timezone.utc).isoformat(),
+        "received_at": received_at,
+        "from_addr": from_addr,
     }
     # Drop any earlier label for the same email so re-labeling overwrites.
     kept = [r for r in load_labels() if r.get("email_id") != email_id]

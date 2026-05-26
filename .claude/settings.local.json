@@ -19,7 +19,13 @@
       "PowerShell(& \"C:\\\\Users\\\\strategyintern2\\\\AppData\\\\Local\\\\Programs\\\\Tesseract-OCR\\\\tesseract.exe\" --version 2>&1)",
       "Bash(python -c ' *)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('classifier/train.py'\\).read\\(\\)\\); ast.parse\\(open\\('apps/streamlit_app/pages/classifier.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(python -c \"from extraction import EXPORT_COLUMNS, build_export_rows; from extraction.quality import score_row; print\\('OK columns:', len\\(EXPORT_COLUMNS\\)\\); print\\('Accuracy idx:', EXPORT_COLUMNS.index\\('Accuracy'\\)\\); r=score_row\\({'Subject':'PO 123','From':'a@b.com','Date':'2026-05-25','PO Numbers':'MEL2025PO1','Score':18.0,'Body Preview':'hi','Contract No':'VA123456','Type':'Online','Item Category':'POS','5lb':1.0,'First Size':2.0,'Total':3.0}\\); print\\('full row score:', r\\); print\\('blank row:', score_row\\({'Score':10.86}\\)\\)\")"
+      "Bash(python -c \"from extraction import EXPORT_COLUMNS, build_export_rows; from extraction.quality import score_row; print\\('OK columns:', len\\(EXPORT_COLUMNS\\)\\); print\\('Accuracy idx:', EXPORT_COLUMNS.index\\('Accuracy'\\)\\); r=score_row\\({'Subject':'PO 123','From':'a@b.com','Date':'2026-05-25','PO Numbers':'MEL2025PO1','Score':18.0,'Body Preview':'hi','Contract No':'VA123456','Type':'Online','Item Category':'POS','5lb':1.0,'First Size':2.0,'Total':3.0}\\); print\\('full row score:', r\\); print\\('blank row:', score_row\\({'Score':10.86}\\)\\)\")",
+      "Bash(c:/PO/.venv/Scripts/python.exe -c \"from classifier.train import train_classifier; import json; m = train_classifier\\(\\); print\\(json.dumps\\(m, indent=2\\)\\)\")",
+      "Bash(c:/PO/.venv/Scripts/python.exe -c ' *)",
+      "Bash(c:/PO/.venv/Scripts/python.exe -c \"from classifier.train import train_classifier; import json; print\\(json.dumps\\(train_classifier\\(\\), indent=2\\)\\)\")",
+      "Bash(c:/PO/.venv/Scripts/python.exe -c \"from classifier.train import train_classifier; import json; m = train_classifier\\(\\); print\\(json.dumps\\({k: m[k] for k in \\('n_labels_raw','n_duplicates_dropped','n_samples','n_with_received_at','cv_accuracy_mean','cv_accuracy_std','time_holdout'\\)}, indent=2\\)\\)\")",
+      "Bash(c:/PO/.venv/Scripts/python.exe -c \"from classifier.train import train_classifier; import json; m = train_classifier\\(\\); print\\(json.dumps\\(m['time_holdout'], indent=2\\)\\); print\\('n_with_received_at:', m['n_with_received_at']\\)\")",
+      "Bash(c:/PO/.venv/Scripts/python.exe -c \"import sklearn; from sklearn.model_selection import StratifiedGroupKFold, GroupKFold; print\\('sklearn', sklearn.__version__, '— StratifiedGroupKFold + GroupKFold available'\\)\")"
     ]
   }
 }
