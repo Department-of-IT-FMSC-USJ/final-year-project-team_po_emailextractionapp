@@ -29,6 +29,7 @@ or memory.
 | **Body extraction** | Regex — 5 fields, 14 date formats, currency-aware, ≤20 item codes |
 | **Table extraction** | BeautifulSoup → 13-column MASTER schema (3 text + 10 size cols) |
 | **Image OCR** | Tesseract → re-run body regex on OCR text |
+| **Row quality checks** | 3 per-row checks (Has Sizes · No Duplicates In Email · All Sizes Under 5000) — ✅/❌ in UI, `True`/`False` in CSV |
 
 ---
 
@@ -349,6 +350,70 @@ Classifier page in the UI.
   `TESSERACT_CMD` env var → project-local `./tessaret/` or `./tesseract/`
   → `C:\Program Files\Tesseract-OCR\` → `C:\Program Files (x86)\Tesseract-OCR\`
   → `%LOCALAPPDATA%\Programs\Tesseract-OCR\` → system PATH.
+
+### Per-row quality checks (extracted table rows)
+
+Every row that goes into the Extraction dataframe and the CSV export is
+annotated with three boolean quality checks. The on-screen dataframe
+renders them as **✅ / ❌** for at-a-glance scanning; the CSV download
+serializes them as **`True` / `False`** for downstream tooling. Source
+of truth lives in [extraction/export.py](extraction/export.py).
+
+The 9 *size* columns referenced below are
+`5lb`, `First Size`, `Up To 1Mth`, `Up To 3Mth`, `3-6 Mths`, `6-9 Mths`,
+`9-12 Mths`, `12-18 Mths`, `1.5-2 Yrs`. **`Total` is deliberately
+excluded** from the size-bracket checks because it is a derived sum,
+not a size — it is empty by design on Base Qty / 7% rows, and on rows
+that do populate it the legitimate value can exceed any per-bracket
+threshold (e.g. PRICE TICKET totals of 6100, 5935, 5410).
+
+| Column | Pass condition | Catches |
+|---|---|---|
+| **Has Sizes** | At least one of the 9 size columns has a value | Rows where extraction produced no usable size data — typically emails with no parsed table at all, or rows where every size cell got dropped by OCR |
+| **No Duplicates In Email** | No other row in the same email shares this row's `(Contract No, Item Category, Type)` triple | Parser bugs that emit the same row twice; same forwarded contract block being extracted into the same email's output set more than once |
+| **All Sizes Under 5000** | Every numeric value in the 9 non-Total size columns is ≤ 5000 | Decimal-loss OCR bugs like `1551.50` → `155150`, or any other situation where a single bracket cell is implausibly large for a children's-apparel size split |
+
+#### Cascade rule
+
+**`Has Sizes` is the gate.** When it fails (the row has no usable size
+data), the other two checks are forced to fail too — otherwise a row
+with all sizes empty would vacuously pass "No Duplicates" (nothing to
+duplicate) and "All Sizes Under 5000" (nothing exceeds), which is
+misleading. A row with no sizes is not a clean row. So the three
+columns can only ever land in one of these states:
+
+| Has Sizes | No Duplicates | All Sizes Under 5000 | Interpretation |
+|---|---|---|---|
+| ❌ | ❌ | ❌ | No size data — review the underlying email / OCR |
+| ✅ | ✅ | ✅ | Clean row |
+| ✅ | ✅ | ❌ | At least one bracket is implausibly large — likely OCR error |
+| ✅ | ❌ | ✅ | Row was emitted more than once — parser bug |
+| ✅ | ❌ | ❌ | Both above |
+
+#### Where the rendering split lives
+
+- `build_export_rows()` writes Python `True` / `False` into each row dict.
+- `build_export_csv()` feeds those rows straight into `csv.DictWriter`,
+  which serializes bools as the literal strings `True` / `False` —
+  matching the existing `Has Attachments` column's format.
+- `format_quality_checks_for_ui()` returns an emoji-mapped *copy* of
+  the rows; the Streamlit page passes the copy to `st.dataframe` while
+  the CSV download path still sees the raw boolean rows. Source rows
+  are not mutated, so the two views never disagree about what passed.
+
+#### Caveats
+
+- Checks 2 and 3 are *necessary but not sufficient*. A row with all
+  three ✅ can still be wrong (e.g. a single OCR digit error inside a
+  bracket cell that doesn't blow past 5000). For deeper checks see the
+  ideas in the Extraction comments — row-total math invariants, the
+  `7% ≈ Base Qty × 1.07` ratio check, and cross-source agreement between
+  the HTML body table and image-OCR rows are the next-tier wins.
+- Threshold `5000` is a hand-picked sentinel calibrated against this
+  corpus's normal bracket magnitudes; bump it in
+  [extraction/export.py](extraction/export.py) (`_MAX_SIZE_VALUE`) if
+  you start labeling POs whose per-bracket quantities legitimately
+  exceed it.
 
 ---
 
