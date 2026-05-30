@@ -9,7 +9,12 @@ from datetime import datetime
 import httpx
 import streamlit as st
 
-from extraction import EXPORT_COLUMNS, build_export_csv, build_export_rows
+from extraction import (
+    EXPORT_COLUMNS,
+    build_export_csv,
+    build_export_rows,
+    format_quality_checks_for_ui,
+)
 
 
 def _flatten(value) -> str:
@@ -114,10 +119,12 @@ def render(client: httpx.Client) -> None:
 
     st.success(f"{len(po_emails)} PO email(s) detected · {data['count']} scanned")
 
-    # One row per parsed item — same schema as the CSV export.
+    # One row per parsed item — same schema as the CSV export. Quality
+    # checks are stored as booleans; emoji-format for the on-screen
+    # dataframe only — the CSV download still gets True / False.
     export_rows = build_export_rows(po_emails)
     st.dataframe(
-        export_rows,
+        format_quality_checks_for_ui(export_rows),
         use_container_width=True,
         hide_index=True,
         column_order=EXPORT_COLUMNS,

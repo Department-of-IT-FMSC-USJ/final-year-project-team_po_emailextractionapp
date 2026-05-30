@@ -25,7 +25,8 @@
       "Bash(c:/PO/.venv/Scripts/python.exe -c \"from classifier.train import train_classifier; import json; print\\(json.dumps\\(train_classifier\\(\\), indent=2\\)\\)\")",
       "Bash(c:/PO/.venv/Scripts/python.exe -c \"from classifier.train import train_classifier; import json; m = train_classifier\\(\\); print\\(json.dumps\\({k: m[k] for k in \\('n_labels_raw','n_duplicates_dropped','n_samples','n_with_received_at','cv_accuracy_mean','cv_accuracy_std','time_holdout'\\)}, indent=2\\)\\)\")",
       "Bash(c:/PO/.venv/Scripts/python.exe -c \"from classifier.train import train_classifier; import json; m = train_classifier\\(\\); print\\(json.dumps\\(m['time_holdout'], indent=2\\)\\); print\\('n_with_received_at:', m['n_with_received_at']\\)\")",
-      "Bash(c:/PO/.venv/Scripts/python.exe -c \"import sklearn; from sklearn.model_selection import StratifiedGroupKFold, GroupKFold; print\\('sklearn', sklearn.__version__, '— StratifiedGroupKFold + GroupKFold available'\\)\")"
+      "Bash(c:/PO/.venv/Scripts/python.exe -c \"import sklearn; from sklearn.model_selection import StratifiedGroupKFold, GroupKFold; print\\('sklearn', sklearn.__version__, '— StratifiedGroupKFold + GroupKFold available'\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 c:/PO/.venv/Scripts/python.exe -c ' *)"
     ]
   }
 }
